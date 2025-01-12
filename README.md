@@ -1,4 +1,4 @@
-# Radiological_image_processing
+# Radiological image processing
 
 Preprocessing operations for **non-contrast CT**, **contrast-enhanced CT**, **non-contrast MRI**, and **contrast-enhanced MRI** image data.
 
