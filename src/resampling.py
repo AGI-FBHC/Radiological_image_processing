@@ -16,13 +16,13 @@ def resample_z_direction(
         spacing: float = 1.0,
         is_print: bool = False
         ):
-    """Resample the z direction of a nifti file.
-    :param nii_path: nii.gz file path.
-    :param is_mask: Is file mask or not?
-    :param output_file: resample result file path.
-    :param spacing: z-spacing (in mm).
-    :param is_print: Is print input path?
-    :return: None.
+    """对 NIfTI 文件的 z 方向重采样。
+    :param nii_path: 输入的 nifti 文件路径。
+    :param is_mask: 是否是掩码文件?
+    :param output_file: 重采样后保存的文件路径。
+    :param spacing: z 轴的新体素间距(单位：mm)。
+    :param is_print: 是否打印文件处理状态?
+    :return: None
     """
     nii = nib.load(nii_path)
     data = nii.get_fdata()
@@ -30,7 +30,7 @@ def resample_z_direction(
     z_spacing = np.abs(affine[2, 2])
     zoom_factor = z_spacing / spacing
     scale_factors = [1, 1, zoom_factor]
-    new_data = zoom(data, scale_factors, order=0)
+    new_data = zoom(data, scale_factors, order=0 if is_mask else 1)  # 对image数据采用现行插值，mask数据采用最近邻插值
     new_data = np.rint(new_data).astype(np.uint8) if is_mask else new_data  # mask 可能存在差值后的精度问题，需要舍入
     new_affine = affine.copy()
     new_affine[2, 2] = np.sign(affine[2, 2]) * spacing
