@@ -42,7 +42,7 @@ def resample_z_direction(
         zoom_factor = z_spacing / spacing
 
     scale_factors = [1, 1, zoom_factor]
-    new_data = zoom(data, scale_factors, order=0 if is_mask else 1)  # 对image数据采用线性插值，mask数据采用最近邻插值
+    new_data = zoom(data, scale_factors, order=0 if is_mask else 3)  # 对image数据采用3次插值，mask数据采用最近邻插值
     new_data = np.rint(new_data).astype(np.uint8) if is_mask else new_data  # mask 可能存在差值后的精度问题，需要舍入
 
     new_affine = affine.copy()
