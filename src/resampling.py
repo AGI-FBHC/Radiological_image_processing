@@ -49,6 +49,12 @@ def resample_z_direction(
     new_affine[2, 2] = np.sign(affine[2, 2]) * spacing  # Update the z-spacing in the affine matrix
 
     new_img = nib.Nifti1Image(new_data, affine=new_affine, header=nii.header)
+
+    # 更新 z 轴的相关字段
+    new_img.header['dim'][3] = new_data.shape[2]  # 更新 z 方向的维度
+    new_img.header['pixdim'][3] = spacing  # 更新 z 轴体素间距
+    new_img.header['srow_z'] = new_affine[2, :4]  # 更新 srow_z（仿射矩阵的第 3 行）
+
     nib.save(new_img, output_file)
 
     print(f'resampling {nii_path} completed.') if is_print else None
