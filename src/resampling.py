@@ -12,7 +12,7 @@ from scipy.ndimage import zoom
 def resample_z_direction(
         nii_path: str,
         is_mask: bool = False,
-        output_file: str = 'output.nii.gz',
+        output_path: str = 'output.nii.gz',
         spacing: float = 1.0,
         target_depth: int = None,
         is_print: bool = False
@@ -21,7 +21,7 @@ def resample_z_direction(
     则根据 target_depth 变换厚度，否则根据物理距离 spacing.
     :param nii_path: 输入的 nifti 文件路径。
     :param is_mask: 是否是掩码文件?
-    :param output_file: 重采样后保存的文件路径。
+    :param output_path: 重采样后保存的文件路径。
     :param spacing: z 轴的新体素间距(单位：mm)。
     :param target_depth: z轴采样目标厚度(单位：pixel)。
     :param is_print: 是否打印文件处理状态?
@@ -55,7 +55,7 @@ def resample_z_direction(
     new_img.header['pixdim'][3] = spacing  # 更新 z 轴体素间距
     new_img.header['srow_z'] = new_affine[2, :4]  # 更新 srow_z（仿射矩阵的第 3 行）
 
-    nib.save(new_img, output_file)
+    nib.save(new_img, output_path)
 
     print(f'resampling {nii_path} completed.') if is_print else None
     return original_depth
