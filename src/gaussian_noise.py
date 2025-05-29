@@ -1,80 +1,85 @@
-import os
-from typing import Tuple
-
-from batchgeneratorsv2.helpers.scalar_type import RandomScalar, sample_scalar
-from batchgeneratorsv2.transforms.base.basic_transform import ImageOnlyTransform
+# -*- coding: utf-8 -*-
+# @Time    : 2025/5/29 08:36
+# @Author  : D.N. Huang
+# @Email   : CarlCypress@yeah.net
+# @FileName: gaussian_noise.py
+# @Project : Radiological_image_processing
 import torch
+import torchio as tio
+from torchio import Subject, ScalarImage
+from typing import Union, Tuple
 
 
-class GaussianNoiseTransform(ImageOnlyTransform):
+class GaussianNoiseTransform(tio.Transform):
     def __init__(self,
-                 noise_variance: RandomScalar = (0, 0.1),
-                 p_per_channel: float = 1.,
-                 synchronize_channels: bool = False):
+                 noise_variance=(0, 0.1),
+                 p_per_channel=1.0,
+                 synchronize_channels=False,
+                 p=1.0):
+        """
+        GaussianNoiseTransform
+
+        为图像添加高斯噪声的自定义变换类。
+
+        参数说明：
+        -----------
+        noise_variance : float 或 Tuple[float, float], 默认值=(0, 0.1)
+            控制高斯噪声的标准差（σ）。如果是一个区间 (a, b)，表示从中均匀采样一个σ。
+            例如：(0, 0.1) 表示对每个应用的通道采样一个 σ ∈ [0, 0.1]。
+
+        p_per_channel : float ∈ [0, 1], 默认值=1.0
+            每个通道被添加噪声的概率。例如 0.5 表示每个通道有 50% 的概率添加噪声。
+
+        synchronize_channels : bool, 默认值=False
+            是否对所有通道使用相同的噪声：
+            - True：所有通道使用相同的 σ 和噪声（常用于保持图像结构一致性）。
+            - False：每个通道独立添加不同的噪声。
+
+        p : float ∈ [0, 1], 默认值=1.0
+            整个 transform 被应用的概率。p=0.1 表示该变换仅有 10% 的概率被应用于每个样本。
+
+        注意事项：
+        -----------
+        该变换仅应用于图像（不影响 mask 或 label），通常用于数据增强阶段以提升模型鲁棒性。
+        """
+        super().__init__(p=p)
         self.noise_variance = noise_variance
         self.p_per_channel = p_per_channel
         self.synchronize_channels = synchronize_channels
-        super().__init__()
 
-    def get_parameters(self, **data_dict) -> dict:
-        shape = data_dict['image'].shape
-        dct = {}
-        dct['apply_to_channel'] = torch.rand(shape[0]) < self.p_per_channel
-        dct['sigmas'] = \
-            [sample_scalar(self.noise_variance, data_dict['image'])
-             for i in range(sum(dct['apply_to_channel']))] if not self.synchronize_channels \
-                else sample_scalar(self.noise_variance, data_dict['image'])
-        return dct
+    def apply_transform(self, subject: tio.Subject) -> tio.Subject:
+        image = subject['image'].data  # shape: (1 or C, D, H, W)
+        C = image.shape[0]
 
-    def _apply_to_image(self, img: torch.Tensor, **params) -> torch.Tensor:
-        if sum(params['apply_to_channel']) == 0:
-            return img
-        gaussian_noise = self._sample_gaussian_noise(img.shape, **params)
-        img[params['apply_to_channel']] += gaussian_noise
-        return img
-
-    def _sample_gaussian_noise(self, img_shape: Tuple[int, ...], **params):
-        if not isinstance(params['sigmas'], list):
-            num_channels = sum(params['apply_to_channel'])
-            # gaussian = torch.tile(torch.normal(0, params['sigmas'], size=(1, *img_shape[1:])),
-            #                       (num_channels, *[1]*(len(img_shape) - 1)))
-            gaussian = torch.normal(0, params['sigmas'], size=(1, *img_shape[1:]))
-            gaussian.expand((num_channels, *[-1]*(len(img_shape) - 1)))
+        apply_to_channel = torch.rand(C) < self.p_per_channel
+        if self.synchronize_channels:
+            sigma = torch.empty(1).uniform_(*self.noise_variance).item()
+            noise = torch.normal(mean=0, std=sigma, size=image.shape)
+            image[apply_to_channel] += noise[apply_to_channel]
         else:
-            gaussian = [
-                torch.normal(0, i, size=(1, *img_shape[1:])) for i in params['sigmas']
-            ]
-            gaussian = torch.cat(gaussian, dim=0)
-        return gaussian
+            for c in range(C):
+                if apply_to_channel[c]:
+                    sigma = torch.empty(1).uniform_(*self.noise_variance).item()
+                    noise = torch.normal(mean=0, std=sigma, size=image[c].shape)
+                    image[c] += noise
+
+        subject['image'].set_data(image)
+        return subject
 
 
 if __name__ == "__main__":
-    from time import time
-    import numpy as np
-
-    os.environ['OMP_NUM_THREADS'] = '1'
-    torch.set_num_threads(1)
-
-    gnt = GaussianNoiseTransform((0, 0.1), 1, False)
-
-    times = []
-    for _ in range(1000):
-        data_dict = {'image': torch.ones((2, 32, 32, 32))}
-        st = time()
-        out = gnt(**data_dict)
-        times.append(time() - st)
-    print('torch', np.mean(times))
-
-    from batchgenerators.transforms.noise_transforms import GaussianNoiseTransform
-
-    gnt_bg = GaussianNoiseTransform((0, 0.1), 1, 1, True)
-
-    times = []
-    for _ in range(1000):
-        data_dict = {'data': np.ones((1, 2, 32, 32, 32))}
-        st = time()
-        out = gnt_bg(**data_dict)
-        times.append(time() - st)
-
-    print('bg', np.mean(times))
-    # torch is 2.5x faster
+    image = ScalarImage(tensor=torch.rand(1, 40, 160, 256))
+    subject = Subject(image=image)
+    transform = tio.Compose([
+        GaussianNoiseTransform(
+            noise_variance=(0, 0.1),  # 控制噪声强度
+            p_per_channel=1.0,  # 每个通道都可能加噪声
+            synchronize_channels=True,  # 每个通道独立添加
+            p=0.1
+        ),
+        tio.RescaleIntensity(out_min_max=(0, 1)),  # 强度重缩放
+        tio.Resize((40, 160, 256)),  # 尺寸调整
+    ])
+    transformed = transform(subject)
+    print(transformed['image'].data.shape)
+    pass

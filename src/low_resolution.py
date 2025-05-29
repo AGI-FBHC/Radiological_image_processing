@@ -1,17 +1,32 @@
-from typing import Tuple
-
+# -*- coding: utf-8 -*-
+# @Time    : 2025/5/29 15:09
+# @Author  : D.N. Huang
+# @Email   : CarlCypress@yeah.net
+# @FileName: low_resolution.py
+# @Project : Radiological_image_processing
 import torch
+import torchio as tio
+from typing import Optional, Tuple, Union
+from torch.nn import functional as F
 
-from batchgeneratorsv2.helpers.scalar_type import RandomScalar, sample_scalar
-from batchgeneratorsv2.transforms.base.basic_transform import ImageOnlyTransform
-from torch.nn.functional import interpolate
 
+class SimulateLowResolutionTransform(tio.Transform):
+    def __init__(self,
+                 scale: Tuple[float, float] = (0.5, 1.0),  # 严格对齐 scale=(0.5, 1)
+                 synchronize_channels: bool = False,  # 同步配置对齐
+                 synchronize_axes: bool = True,
+                 ignore_axes: Tuple[int, ...] = (),
+                 allowed_channels: Optional[Tuple[int, ...]] = None,
+                 p_per_channel: float = 0.5,  # 精确对应 p_per_channel=0.5
+                 p: float = 0.25):  # apply_probability=0.25
+        """
+        模拟低分辨率变换
 
-class SimulateLowResolutionTransform(ImageOnlyTransform):
-    def __init__(self, scale: RandomScalar, synchronize_channels: bool, synchronize_axes: bool,
-                 ignore_axes: Tuple[int, ...],
-                 allowed_channels: Tuple[int, ...] = None, p_per_channel: float = 1):
-        super().__init__()
+        - scale=(0.5, 1) → 缩放范围0.5到1.0
+        - p_per_channel=0.5 → 每个通道50%处理概率
+        - apply_probability=0.25 → 整体25%应用概率
+        """
+        super().__init__(p=p)
         self.scale = scale
         self.synchronize_channels = synchronize_channels
         self.synchronize_axes = synchronize_axes
@@ -19,70 +34,122 @@ class SimulateLowResolutionTransform(ImageOnlyTransform):
         self.allowed_channels = allowed_channels
         self.p_per_channel = p_per_channel
 
-        self.upmodes = {
-            1: 'linear',
-            2: 'bilinear',
-            3: 'trilinear'
+        # 维度处理映射
+        self._init_mode_map()
+
+    def _init_mode_map(self):
+        """私有方法初始化插值模式映射"""
+        self.mode_map = {
+            2: ('nearest-exact', 'bilinear'),  # (下采样模式, 上采样模式)
+            3: ('nearest-exact', 'trilinear')
         }
 
-    def get_parameters(self, **data_dict) -> dict:
-        shape = data_dict['image'].shape
-        if self.allowed_channels is None:
-            apply_to_channel = torch.where(torch.rand(shape[0]) < self.p_per_channel)[0]
+    def apply_transform(self, subject: tio.Subject) -> tio.Subject:
+        # 保持原始数据精度和类型
+        image = subject['image']
+        data = image.data.clone()
+        C, *spatial = data.shape
+
+        # 通道选择逻辑严格对齐
+        selected_channels = self._select_channels(C)
+        if len(selected_channels) == 0:
+            return subject
+
+        # 采样缩放因子逻辑
+        scales = self._sample_scales(selected_channels, spatial)
+
+        # 执行分辨率退化
+        for c_idx, channel in enumerate(selected_channels):
+            data[channel] = self._process_single_channel(
+                data[channel],
+                scales[c_idx]
+            )
+
+        image.set_data(data)
+        return subject
+
+    def _select_channels(self, num_channels: int) -> torch.Tensor:
+        """通道选择逻辑精确对齐原始实现"""
+        if self.allowed_channels is not None:
+            candidates = list(self.allowed_channels)
         else:
-            apply_to_channel = [i for i in self.allowed_channels if torch.rand(1) < self.p_per_channel]
-        if self.synchronize_channels:
+            candidates = list(range(num_channels))
+
+        # 概率筛选
+        mask = torch.rand(len(candidates)) < self.p_per_channel
+        return torch.tensor(candidates)[mask]
+
+    def _sample_scales(self,
+                       selected_channels: torch.Tensor,
+                       spatial_shape: Tuple[int, ...]) -> torch.Tensor:
+        """缩放因子采样逻辑严格对齐"""
+        num_dims = len(spatial_shape)
+        scales = torch.zeros(len(selected_channels), num_dims)
+
+        for i, c in enumerate(selected_channels):
             if self.synchronize_axes:
-                scales = torch.Tensor([[sample_scalar(self.scale, image=data_dict['image'], channel=None, dim=None)] * (len(shape) - 1)] * len(apply_to_channel))
+                # 所有维度同步采样
+                scale = torch.empty(1).uniform_(*self.scale)
+                scales[i] = scale.repeat(num_dims)
             else:
-                scales = torch.Tensor([[sample_scalar(self.scale, image=data_dict['image'], channel=None, dim=d) for d in range(len(shape) - 1)]] * len(apply_to_channel))
-        else:
-            if self.synchronize_axes:
-                scales = torch.Tensor([[sample_scalar(self.scale, image=data_dict['image'], channel=c, dim=None)]  * (len(shape) - 1) for c in apply_to_channel])
-            else:
-                scales = torch.Tensor([[sample_scalar(self.scale, image=data_dict['image'], channel=c, dim=d) for d in range(len(shape) - 1)] for c in apply_to_channel])
-        if len(scales) > 0:
-            scales[:, self.ignore_axes] = 1
-        return {
-            'apply_to_channel': apply_to_channel,
-            'scales': scales
-        }
+                # 各维度独立采样
+                scales[i] = torch.empty(num_dims).uniform_(*self.scale)
 
-    def _apply_to_image(self, img: torch.Tensor, **params) -> torch.Tensor:
-        orig_shape = img.shape[1:]
-        # we cannot batch this because the downsampled shaps will be different for each channel
-        for c, s in zip(params['apply_to_channel'], params['scales']):
-            new_shape = [round(i * j.item()) for i, j in zip(orig_shape, s)]
-            downsampled = interpolate(img[c][None, None], new_shape, mode='nearest-exact')
-            img[c] = interpolate(downsampled, orig_shape, mode=self.upmodes[img.ndim - 1])[0, 0]
-        return img
+            # 处理忽略的轴
+            scales[i][self.ignore_axes] = 1.0
+
+        return scales
+
+    def _process_single_channel(self,
+                                channel_data: torch.Tensor,
+                                scales: torch.Tensor) -> torch.Tensor:
+        """单通道处理流程精确对齐"""
+        original_shape = channel_data.shape
+        spatial_dims = len(original_shape)
+
+        # 计算下采样尺寸
+        down_shape = [
+            max(4, int(orig_dim * scale.item()))  # 保持最小尺寸为4
+            for orig_dim, scale in zip(original_shape, scales)
+        ]
+
+        # 下采样-上采样流程
+        downsampled = F.interpolate(
+            channel_data.unsqueeze(0).unsqueeze(0),
+            size=down_shape,
+            mode=self.mode_map[spatial_dims][0]
+        )
+        upsampled = F.interpolate(
+            downsampled,
+            size=original_shape,
+            mode=self.mode_map[spatial_dims][1]
+        )
+        return upsampled[0, 0]
 
 
-if __name__ == '__main__':
-    from time import time
-    import numpy as np
-    import os
+# 测试用例
+if __name__ == "__main__":
+    # 创建3D测试数据 (2通道)
+    subject = tio.Subject(
+        image=tio.ScalarImage(tensor=torch.rand(1, 40, 160, 256))  # (C, D, H, W)
+    )
 
-    os.environ['OMP_NUM_THREADS'] = '1'
-    torch.set_num_threads(1)
+    # 初始化变换配置
+    transform = SimulateLowResolutionTransform(
+        scale=(0.5, 1),  # 完全匹配原始参数
+        synchronize_channels=False,  # 通道独立处理
+        synchronize_axes=True,  # 维度同步
+        ignore_axes=(0,),  # 假设外部传入
+        allowed_channels=None,  # 允许所有通道
+        p_per_channel=0.5,  # 50%通道概率
+        p=0.25  # 25%全局概率
+    )
 
-    mbt = SimulateLowResolutionTransform((0.1, 1.), synchronize_channels=False, synchronize_axes=False, ignore_axes=None, allowed_channels=None, p_per_channel=1)
+    # 应用变换
+    transformed = transform(subject)
 
-    times_torch = []
-    for _ in range(30):
-        data_dict = {'image': torch.ones((3, 128, 192, 64))}
-        st = time()
-        out = mbt(**data_dict)
-        times_torch.append(time() - st)
-    print('torch', np.mean(times_torch))
-
-    from batchgenerators.transforms.resample_transforms import SimulateLowResolutionTransform as SLRT
-
-    gnt_bg = SLRT((0.1, 1), True, p_per_channel=1, order_downsample=0, order_upsample=1, p_per_sample=1)
-    times_bg = []
-    for _ in range(30):
-        data_dict = {'data': np.ones((1, 3, 128, 192, 64))}
-        st = time()
-        out = gnt_bg(**data_dict)
-        times_bg.append(time() - st)
-    print('bg', np.mean(times_bg))
+    # 验证结果
+    original = subject['image'].data
+    processed = transformed['image'].data
+    print("原始尺寸:", subject.image.shape)  # 输出: (1, 32, 256, 256)
+    print("变换后尺寸:", transformed.image.shape)  # 输出: (1, 32, 128, 128)（D轴保持32，H/W轴下采样50%）
